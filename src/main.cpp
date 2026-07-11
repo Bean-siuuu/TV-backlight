@@ -1,0 +1,542 @@
+#include <Arduino.h>
+#include <string.h>
+
+#include "FastLED.h"
+#include "strip_index.h"
+
+#include "esp_camera.h"
+#include <esp_log.h>
+#include "sensor.h"
+
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
+//-------------------------------------
+// LED strip settings
+#define LED_PIN 15 // no #CS(GPIO15) required
+#define NUM_LEDS 258
+#define STRIP_WIDTH 84 // number of LEDS
+#define STRIP_HEIGHT 45 // number of LEDS
+#define RIGHT_START 0
+#define TOP_START (RIGHT_START + STRIP_HEIGHT)
+#define LEFT_START (TOP_START + STRIP_WIDTH)
+#define BOTTOM_START (LEFT_START + STRIP_HEIGHT) // Right to top to left to bottom
+
+#define EDGE_SAMPLES 2
+#define INWARD_SAMPLES 4 // 8 pixels for each LED
+
+#define CHIPSET WS2812B
+#define COLOR_ORDER GRB
+#define BRIGHTNESS 120
+CRGB leds[NUM_LEDS]; // arry for store the RGB data for strip
+
+//Camera settings
+#define IMG_WIDTH 160
+#define IMG_HEIGHT 120
+#define FRAME_PIXELS (IMG_WIDTH * IMG_HEIGHT)
+#define FRAME_BYTES  (FRAME_PIXELS * sizeof(uint16_t))
+
+// Double buffer for dual-core
+uint16_t *bufferA = nullptr;
+uint16_t *bufferB = nullptr;
+uint16_t *writeBuffer = nullptr;
+uint16_t *readBuffer = nullptr;
+
+volatile bool newFrameReady = false;
+
+SemaphoreHandle_t frameMutex = nullptr;
+
+// FreeRTOS task handles
+TaskHandle_t cameraTaskHandle = nullptr;
+
+// ESP32Cam (AiThinker) PIN Map
+#define CAM_PIN_PWDN 32
+#define CAM_PIN_RESET -1 //software reset will be performed
+#define CAM_PIN_XCLK 0
+#define CAM_PIN_SIOD 26
+#define CAM_PIN_SIOC 27
+#define CAM_PIN_D7 35
+#define CAM_PIN_D6 34
+#define CAM_PIN_D5 39
+#define CAM_PIN_D4 36
+#define CAM_PIN_D3 21
+#define CAM_PIN_D2 19
+#define CAM_PIN_D1 18
+#define CAM_PIN_D0 5
+#define CAM_PIN_VSYNC 25
+#define CAM_PIN_HREF 23
+#define CAM_PIN_PCLK 22
+
+// Log module tag
+static const char *TAG = "ambilight";
+
+static camera_config_t camera_config = {
+    .pin_pwdn = CAM_PIN_PWDN,
+    .pin_reset = CAM_PIN_RESET,
+    .pin_xclk = CAM_PIN_XCLK,
+    .pin_sccb_sda = CAM_PIN_SIOD,
+    .pin_sccb_scl = CAM_PIN_SIOC,
+    
+
+    .pin_d7 = CAM_PIN_D7,
+    .pin_d6 = CAM_PIN_D6,
+    .pin_d5 = CAM_PIN_D5,
+    .pin_d4 = CAM_PIN_D4,
+    .pin_d3 = CAM_PIN_D3,
+    .pin_d2 = CAM_PIN_D2,
+    .pin_d1 = CAM_PIN_D1,
+    .pin_d0 = CAM_PIN_D0,
+    .pin_vsync = CAM_PIN_VSYNC,
+    .pin_href = CAM_PIN_HREF,
+    .pin_pclk = CAM_PIN_PCLK,
+
+    //XCLK 20MHz or 10MHz for OV2640 double FPS (Experimental)
+    .xclk_freq_hz = 10000000,
+    .ledc_timer = LEDC_TIMER_0,
+    .ledc_channel = LEDC_CHANNEL_0,
+    
+    //.ledc_timer = LEDC_TIMER_1,
+    //.ledc_channel = LEDC_CHANNEL_1,
+
+    .pixel_format = PIXFORMAT_RGB565, //YUV422,GRAYSCALE,RGB565,JPEG
+    
+    .frame_size = FRAMESIZE_QQVGA,    //QQVGA-UXGA, For ESP32, do not use sizes above QVGA when not JPEG. The performance of the ESP32-S series has improved a lot, but JPEG mode always gives better frame rates.
+
+    .fb_count = 1,       //When jpeg mode is used, if fb_count more than one, the driver will work in continuous mode.
+    .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
+    
+};
+
+//------------------------------------------------------
+// put function declarations here:
+bool initFrameBuffers();
+bool initCamera();
+void initLedStrip();
+
+void cameraTask(void *pvParameters);
+void copyFrameToBuffer(camera_fb_t *fb);
+void swapFrameBuffers(); // read and write
+
+void calculateLEDColors();
+void calculateRight();
+void calculateTop();
+void calculateLeft();
+void calculateBottom();
+CRGB sampleAverageColor(
+    int baseX,
+    int baseY,
+    int inwardDx,
+    int inwardDy,
+    int tangentDx,
+    int tangentDy
+);
+CRGB rgb565ToCRGB(uint16_t pixel);
+
+//---------------------------------------------------------------------------------
+bool initFrameBuffers() {
+	if (psramFound())
+	{
+		ESP_LOGI(TAG, "PSRAM found. Allocating frame buffers in PSRAM.");
+		bufferA = (uint16_t*)heap_caps_malloc(
+			FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+		);
+		bufferB = (uint16_t*)heap_caps_malloc(
+			FRAME_BYTES,
+			MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+		);
+	}
+	else
+	{
+		ESP_LOGW(TAG, "PSRAM not found. Allocating frame buffers in internal RAM.");
+
+		bufferA = (uint16_t*)heap_caps_malloc(
+			FRAME_BYTES,
+			MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+		);
+
+		bufferB = (uint16_t*)heap_caps_malloc(
+			FRAME_BYTES,
+			MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+		);
+	}
+
+	if (bufferA == nullptr || bufferB == nullptr)
+	{
+		ESP_LOGE(TAG, "Frame buffer allocation failed.");
+
+		if (bufferA != nullptr)
+		{
+			heap_caps_free(bufferA);
+			bufferA = nullptr;
+		}
+
+		if (bufferB != nullptr)
+		{
+			heap_caps_free(bufferB);
+			bufferB = nullptr;
+		}
+
+		writeBuffer = nullptr;
+		readBuffer = nullptr;
+
+		return false;
+	}
+
+	memset(bufferA, 0, FRAME_BYTES);
+	memset(bufferB, 0, FRAME_BYTES);
+
+	writeBuffer = bufferA;
+	readBuffer = bufferB;
+
+	ESP_LOGI(TAG, "Frame buffers initialized successfully.");
+	ESP_LOGI(TAG, "Free heap: %u", (unsigned int)ESP.getFreeHeap());
+	ESP_LOGI(TAG, "PSRAM size: %u", (unsigned int)ESP.getPsramSize());
+	ESP_LOGI(TAG, "Free PSRAM: %u", (unsigned int)ESP.getFreePsram());
+
+	return true;
+}
+bool initCamera() {
+	ESP_LOGI(TAG, "Initializing camera...");
+	esp_err_t err = esp_camera_init(&camera_config);
+
+	if (err != ESP_OK)
+	{
+		ESP_LOGE(TAG, "Camera initialization failed. Error code: 0x%x", err);
+		return false;
+	}
+	ESP_LOGI(TAG, "Camera driver initialized.");
+	sensor_t* sensor = esp_camera_sensor_get();
+
+	if (sensor == nullptr)
+	{
+		ESP_LOGE(TAG, "Failed to get camera sensor.");
+		return false;
+	}
+
+	// Basic sensor settings.
+	// Keep them simple for the first version.
+	sensor->set_framesize(sensor, FRAMESIZE_QQVGA);
+	sensor->set_brightness(sensor, 0);
+	sensor->set_contrast(sensor, 0);
+	sensor->set_saturation(sensor, 0);
+
+	// Test whether the camera can capture one frame.
+	camera_fb_t* testFrame = esp_camera_fb_get();
+
+	if (testFrame == nullptr)
+	{
+		ESP_LOGE(TAG, "Camera test capture failed.");
+		return false;
+	}
+
+	ESP_LOGI(TAG, "Camera test frame captured.");
+	ESP_LOGI(TAG, "Frame width: %u", (unsigned int)testFrame->width);
+	ESP_LOGI(TAG, "Frame height: %u", (unsigned int)testFrame->height);
+	ESP_LOGI(TAG, "Frame length: %u bytes", (unsigned int)testFrame->len);
+
+	esp_camera_fb_return(testFrame);
+
+	ESP_LOGI(TAG, "Camera initialized successfully.");
+
+	return true;
+}
+void initLedStrip() {
+	ESP_LOGI(TAG, "Initializing LED strip...");
+
+	FastLED.addLeds<CHIPSET, LED_PIN, COLOR_ORDER>(
+		leds,
+		NUM_LEDS
+	);
+	FastLED.setBrightness(BRIGHTNESS);
+	FastLED.clear();
+	FastLED.show();
+
+	ESP_LOGI(TAG, "LED strip initialized.");
+	ESP_LOGI(TAG, "LED pin: %d", LED_PIN);
+	ESP_LOGI(TAG, "Number of LEDs: %d", NUM_LEDS);
+	ESP_LOGI(TAG, "Brightness: %d", BRIGHTNESS);
+}
+
+void cameraTask(void* parameter){
+	ESP_LOGI(TAG, "Camera task started on Core %d", xPortGetCoreID());
+
+	while (1)
+	{
+		camera_fb_t* pic = esp_camera_fb_get();
+
+		if (pic == nullptr)
+		{
+			ESP_LOGE(TAG, "Failed to capture camera frame.");
+			vTaskDelay(pdMS_TO_TICKS(10));
+			continue;
+		}
+
+		copyFrameToBuffer(pic);
+		esp_camera_fb_return(pic);
+		swapFrameBuffers();
+		vTaskDelay(1);
+	}
+}
+void copyFrameToBuffer(camera_fb_t* frame){
+	if (frame == nullptr)
+	{
+		ESP_LOGE(TAG, "copyFrameToBuffer received nullptr frame.");
+		return;
+	}
+	if (writeBuffer == nullptr)
+	{
+		ESP_LOGE(TAG, "writeBuffer is nullptr.");
+		return;
+	}
+	if (frame->len < FRAME_BYTES) //Check if the frame is complete
+	{
+		ESP_LOGE
+    (
+      TAG,"Frame length error. frame->len=%u, expected=%u",
+      (unsigned int)frame->len,
+      (unsigned int)FRAME_BYTES
+    );
+		return;
+	}
+
+	for (uint32_t i = 0; i < FRAME_PIXELS; i++)
+	{
+		uint32_t byteIndex = i * 2;
+		writeBuffer[i] = ((uint16_t)frame->buf[byteIndex] << 8) | ((uint16_t)frame->buf[byteIndex + 1]);
+	}
+}
+void swapFrameBuffers(){
+	if (frameMutex == nullptr)
+	{
+		ESP_LOGE(TAG, "frameMutex is nullptr.");
+		return;
+	}
+
+	if (xSemaphoreTake(frameMutex, portMAX_DELAY) == pdTRUE)
+	{
+    //change address
+		uint16_t* temp = readBuffer;
+		readBuffer = writeBuffer;
+		writeBuffer = temp;
+		newFrameReady = true;
+		xSemaphoreGive(frameMutex);
+	}
+}
+
+void calculateLEDColors(){
+	if (readBuffer == nullptr)
+	{
+		ESP_LOGE(TAG, "readBuffer is nullptr. Cannot calculate LED colors.");
+		return;
+	}
+
+	calculateRight();
+	calculateTop();
+	calculateLeft();
+	calculateBottom();
+}
+CRGB sampleAverageColor(int baseX, int baseY, int inwardDx, int inwardDy, int tangentDx, int tangentDy) {
+	uint32_t rSum = 0;
+	uint32_t gSum = 0;
+	uint32_t bSum = 0;
+	uint8_t sampleCount = 0;
+
+	for (int j = 0; j < EDGE_SAMPLES; j++)
+	{
+		for (int k = 0; k < INWARD_SAMPLES; k++)
+		{
+			int sampleX = baseX + tangentDx * j + inwardDx * k;
+			int sampleY = baseY + tangentDy * j + inwardDy * k;
+
+			if (sampleX < 0 || sampleX >= IMG_WIDTH || sampleY < 0 || sampleY >= IMG_HEIGHT)
+			{
+				continue; // avoid reading outside the frame buffer
+			}
+
+			int index = sampleY * IMG_WIDTH + sampleX;
+			uint16_t pixel565 = readBuffer[index];
+			CRGB color = rgb565ToCRGB(pixel565);
+			rSum += color.r;
+			gSum += color.g;
+			bSum += color.b;
+
+			sampleCount++;
+		}
+	}
+
+	if (sampleCount > 0)
+	{
+		return CRGB(rSum/sampleCount, gSum/sampleCount, bSum/sampleCount);
+	}
+	else
+	{
+		return CRGB::Black; // return black if no valid sample was collected
+	}
+}
+CRGB rgb565ToCRGB(uint16_t pixel){
+    uint8_t r = ((pixel & 0xF800) >> 11) << 3;
+    uint8_t g = ((pixel & 0x07E0) >> 5) << 2;
+    uint8_t b = (pixel & 0x001F) << 3;
+    return CRGB(r, g, b);
+}
+void calculateRight(){
+	for (int i = 0; i < STRIP_HEIGHT; i++)
+	{
+		int baseIndex = (int)right_buf[i]; // defined in "strip_index.h"
+		int baseX = baseIndex % IMG_WIDTH;
+		int baseY = baseIndex / IMG_WIDTH;
+		int inwardDx = -1;
+		int inwardDy = 0;
+		int tangentDx = 0;
+		int tangentDy = 1;
+		if (baseY >= IMG_HEIGHT - 1)
+		{
+			tangentDy = -1;
+		}
+		int ledIndex = RIGHT_START + i;
+
+		leds[ledIndex] = sampleAverageColor(baseX, baseY, inwardDx, inwardDy, tangentDx, tangentDy);
+	}
+}
+void calculateTop(){
+	for (int i = 0; i < STRIP_WIDTH; i++)
+	{
+		int baseIndex = (int)top_buf[i];
+		int baseX = baseIndex % IMG_WIDTH;
+		int baseY = baseIndex / IMG_WIDTH;
+		int inwardDx = 0;
+		int inwardDy = 1;
+		int tangentDx = 1;
+		int tangentDy = 0;
+		if (baseX >= IMG_WIDTH - 1)
+		{
+			tangentDx = -1;
+		}
+		int ledIndex = TOP_START + i;
+
+		leds[ledIndex] = sampleAverageColor(baseX, baseY, inwardDx, inwardDy, tangentDx, tangentDy);
+	}
+}
+void calculateLeft() {
+	for (int i = 0; i < STRIP_HEIGHT; i++)
+	{
+		int baseIndex = (int)left_buf[i];
+		int baseX = baseIndex % IMG_WIDTH;
+		int baseY = baseIndex / IMG_WIDTH;
+		int inwardDx = 1;
+		int inwardDy = 0;
+		int tangentDx = 0;
+		int tangentDy = 1;
+		if (baseY >= IMG_HEIGHT - 1)
+		{
+			tangentDy = -1;
+		}
+		int ledIndex = LEFT_START + i;
+
+		leds[ledIndex] = sampleAverageColor(baseX, baseY, inwardDx, inwardDy, tangentDx, tangentDy);
+	}
+}
+void calculateBottom() {
+	for (int i = 0; i < STRIP_WIDTH; i++)
+	{
+		int baseIndex = (int)bottom_buf[i];
+		int baseX = baseIndex % IMG_WIDTH;
+		int baseY = baseIndex / IMG_WIDTH;
+		int inwardDx = 0;
+		int inwardDy = -1;
+		int tangentDx = 1;
+		int tangentDy = 0;
+		if (baseX >= IMG_WIDTH - 1)
+		{
+			tangentDx = -1;
+		}
+		int ledIndex = BOTTOM_START + i;
+
+		leds[ledIndex] = sampleAverageColor(baseX, baseY, inwardDx, inwardDy, tangentDx, tangentDy);
+	}
+}
+
+void setup(){
+	delay(1000);
+
+	esp_log_level_set(TAG, ESP_LOG_INFO);
+	ESP_LOGI(TAG, "System starting...");
+
+	while (frameMutex == nullptr)
+	{
+		frameMutex = xSemaphoreCreateMutex();
+		if (frameMutex == nullptr)
+		{
+			ESP_LOGE(TAG, "Failed to create frameMutex. Retrying...");
+			delay(2000);
+		}
+	}
+	ESP_LOGI(TAG, "frameMutex created successfully.");
+
+	while (!initFrameBuffers())
+	{
+		ESP_LOGE(TAG, "initFrameBuffers failed. Retrying...");
+		delay(2000);
+	}
+	ESP_LOGI(TAG, "Frame buffers initialized successfully.");
+
+	while (!initCamera())
+	{
+		ESP_LOGE(TAG, "initCamera failed. Retrying...");
+		esp_camera_deinit();
+		delay(2000);
+	}
+	ESP_LOGI(TAG, "Camera initialized successfully.");
+
+	initLedStrip();
+	FastLED.clear();
+	FastLED.show();
+	ESP_LOGI(TAG, "LED strip initialized and cleared.");
+
+	BaseType_t taskResult = pdFAIL;
+	while (taskResult != pdPASS)
+	{
+		taskResult = xTaskCreatePinnedToCore(cameraTask, "CameraTask", 8192, nullptr, 2, &cameraTaskHandle, 0);
+		if (taskResult != pdPASS)
+		{
+			ESP_LOGE(TAG, "Failed to create camera task. Retrying...");
+			delay(2000);
+		}
+	}
+	ESP_LOGI(TAG, "Camera task created successfully.");
+
+	ESP_LOGI(TAG, "Setup completed.");
+}
+
+void loop(){
+	if (newFrameReady)
+	{
+		if (frameMutex == nullptr)
+		{
+			delay(1);
+			return;
+		}
+		if (xSemaphoreTake(frameMutex, portMAX_DELAY) == pdTRUE)
+		{
+			if (newFrameReady && readBuffer != nullptr)
+			{
+				calculateLEDColors();
+
+				newFrameReady = false;
+				xSemaphoreGive(frameMutex);
+
+				FastLED.show();
+			}
+			else
+			{
+				xSemaphoreGive(frameMutex);
+			}
+		}
+	}
+	else
+	{
+		delay(1);
+	}
+}
