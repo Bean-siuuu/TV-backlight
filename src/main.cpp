@@ -34,6 +34,8 @@ float GAMMA_R = 2.0f;
 float GAMMA_G = 2.0f;
 float GAMMA_B = 2.0f;
 CRGB leds[NUM_LEDS]; // arry for store the RGB data for strip
+CRGB previousLeds[NUM_LEDS]; // Store the previously displayed LED colors for smooth transition
+uint8_t smoothAmount = 128; //Portion of previousLeds
 
 //Camera settings
 #define IMG_WIDTH 160
@@ -131,8 +133,10 @@ CRGB sampleAverageColor(
     int tangentDx,
     int tangentDy
 );
-void gammaCorrection();
 CRGB rgb565ToCRGB(uint16_t pixel);
+
+void gammaCorrection();
+void smoothTransition();
 
 //---------------------------------------------------------------------------------
 bool initFrameBuffers() {
@@ -251,6 +255,7 @@ void initLedStrip() {
 	);
 	FastLED.setBrightness(BRIGHTNESS);
 	FastLED.clear();
+	fill_solid(previousLeds, NUM_LEDS, CRGB::Black); // Start from black to the first frame captured
 	FastLED.show();
 
 	ESP_LOGI(TAG, "LED strip initialized.");
@@ -338,6 +343,7 @@ void calculateLEDColors(){
 	calculateBottom();
 
 	gammaCorrection();
+	smoothTransition();
 }
 CRGB sampleAverageColor(int baseX, int baseY, int inwardDx, int inwardDy, int tangentDx, int tangentDy) {
 	uint32_t rSum = 0;
@@ -463,6 +469,20 @@ void gammaCorrection(){
 	for (int i = 0; i < NUM_LEDS; i++)
 	{
 		leds[i] = applyGamma_video(leds[i], GAMMA_R, GAMMA_G, GAMMA_B);
+	}
+}
+void smoothTransition(){
+	for (int i = 0; i < NUM_LEDS; i++)
+	{
+		CRGB targetColor = leds[i];
+
+		leds[i] = blend(
+			previousLeds[i],
+			targetColor,
+			smoothAmount
+		);
+
+		previousLeds[i] = leds[i]; // Prepare for next loop
 	}
 }
 
