@@ -29,7 +29,10 @@
 
 #define CHIPSET WS2812B
 #define COLOR_ORDER GRB
-#define BRIGHTNESS 120
+#define BRIGHTNESS 212
+float GAMMA_R = 2.0f;
+float GAMMA_G = 2.0f;
+float GAMMA_B = 2.0f;
 CRGB leds[NUM_LEDS]; // arry for store the RGB data for strip
 
 //Camera settings
@@ -128,6 +131,7 @@ CRGB sampleAverageColor(
     int tangentDx,
     int tangentDy
 );
+void gammaCorrection();
 CRGB rgb565ToCRGB(uint16_t pixel);
 
 //---------------------------------------------------------------------------------
@@ -332,6 +336,8 @@ void calculateLEDColors(){
 	calculateTop();
 	calculateLeft();
 	calculateBottom();
+
+	gammaCorrection();
 }
 CRGB sampleAverageColor(int baseX, int baseY, int inwardDx, int inwardDy, int tangentDx, int tangentDy) {
 	uint32_t rSum = 0;
@@ -451,6 +457,12 @@ void calculateBottom() {
 		int ledIndex = BOTTOM_START + i;
 
 		leds[ledIndex] = sampleAverageColor(baseX, baseY, inwardDx, inwardDy, tangentDx, tangentDy);
+	}
+}
+void gammaCorrection(){
+	for (int i = 0; i < NUM_LEDS; i++)
+	{
+		leds[i] = applyGamma_video(leds[i], GAMMA_R, GAMMA_G, GAMMA_B);
 	}
 }
 
