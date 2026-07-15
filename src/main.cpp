@@ -49,6 +49,11 @@ uint16_t *bufferB = nullptr;
 uint16_t *writeBuffer = nullptr;
 uint16_t *readBuffer = nullptr;
 
+#ifdef WOKWI_SIMULATION // Wokwi doesn't have OV2640
+static uint16_t simulationFrame[FRAME_PIXELS];
+static uint32_t lastSimulationUpdate = 0;
+#endif
+
 volatile bool newFrameReady = false;
 
 SemaphoreHandle_t frameMutex = nullptr;
@@ -134,6 +139,11 @@ CRGB sampleAverageColor(
     int tangentDy
 );
 CRGB rgb565ToCRGB(uint16_t pixel);
+
+#ifdef WOKWI_SIMULATION
+uint16_t rgb888ToRGB565(uint8_t r, uint8_t g, uint8_t b);
+void generateSimulationFrame();
+#endif
 
 void gammaCorrection();
 void smoothTransition();
@@ -389,6 +399,82 @@ CRGB rgb565ToCRGB(uint16_t pixel){
     uint8_t b = (pixel & 0x001F) << 3;
     return CRGB(r, g, b);
 }
+#ifdef WOKWI_SIMULATION
+uint16_t rgb888ToRGB565(uint8_t r, uint8_t g, uint8_t b)
+{
+	return ((uint16_t)(r & 0xF8) << 8)
+		 | ((uint16_t)(g & 0xFC) << 3)
+		 | ((uint16_t)b >> 3);
+}
+
+void generateSimulationFrame()
+{
+	/*
+		Colours change every two seconds.
+
+		sideColors[0] = Right
+		sideColors[1] = Top
+		sideColors[2] = Left
+		sideColors[3] = Bottom
+	*/
+
+	const CRGB testColors[4] = {
+		CRGB::Red,
+		CRGB::Green,
+		CRGB::Blue,
+		CRGB::Yellow
+	};
+
+	uint8_t phase = (millis() / 2000) % 4;
+
+	CRGB sideColors[4] = {
+		testColors[(0 + phase) % 4], // Right
+		testColors[(1 + phase) % 4], // Top
+		testColors[(2 + phase) % 4], // Left
+		testColors[(3 + phase) % 4]  // Bottom
+	};
+
+	for (int y = 0; y < IMG_HEIGHT; y++)
+	{
+		for (int x = 0; x < IMG_WIDTH; x++)
+		{
+			int distanceRight  = (IMG_WIDTH - 1) - x;
+			int distanceTop    = y;
+			int distanceLeft   = x;
+			int distanceBottom = (IMG_HEIGHT - 1) - y;
+
+			int minimumDistance = distanceRight;
+			CRGB selectedColor = sideColors[0];
+
+			if (distanceTop < minimumDistance)
+			{
+				minimumDistance = distanceTop;
+				selectedColor = sideColors[1];
+			}
+
+			if (distanceLeft < minimumDistance)
+			{
+				minimumDistance = distanceLeft;
+				selectedColor = sideColors[2];
+			}
+
+			if (distanceBottom < minimumDistance)
+			{
+				selectedColor = sideColors[3];
+			}
+
+			int pixelIndex = y * IMG_WIDTH + x;
+
+			simulationFrame[pixelIndex] = rgb888ToRGB565(
+				selectedColor.r,
+				selectedColor.g,
+				selectedColor.b
+			);
+		}
+	}
+}
+
+#endif
 void calculateRight(){
 	for (int i = 0; i < STRIP_HEIGHT; i++)
 	{
@@ -492,6 +578,18 @@ void setup(){
 	esp_log_level_set(TAG, ESP_LOG_INFO);
 	ESP_LOGI(TAG, "System starting...");
 
+	#ifdef WOKWI_SIMULATION
+
+	ESP_LOGI(TAG, "Wokwi simulation mode enabled.");
+	initLedStrip();
+	readBuffer = simulationFrame;
+	generateSimulationFrame();
+	calculateLEDColors();
+	FastLED.show();
+	ESP_LOGI(TAG, "Simulation setup completed.");
+
+	#else
+
 	while (frameMutex == nullptr)
 	{
 		frameMutex = xSemaphoreCreateMutex();
@@ -536,9 +634,24 @@ void setup(){
 	ESP_LOGI(TAG, "Camera task created successfully.");
 
 	ESP_LOGI(TAG, "Setup completed.");
+	#endif
 }
 
 void loop(){
+	#ifdef WOKWI_SIMULATION
+
+	uint32_t currentTime = millis();
+	if (currentTime - lastSimulationUpdate >= 100)
+	{
+		lastSimulationUpdate = currentTime;
+		generateSimulationFrame();
+		calculateLEDColors();
+		FastLED.show();
+	}
+
+	delay(1);
+
+    #else
 	if (newFrameReady)
 	{
 		if (frameMutex == nullptr)
@@ -567,4 +680,5 @@ void loop(){
 	{
 		delay(1);
 	}
+	#endif
 }

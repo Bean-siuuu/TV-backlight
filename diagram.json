@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "author": "Bean",
+  "editor": "wokwi",
+
+  "parts": [
+    {
+      "type": "board-esp32-s3-devkitc-1",
+      "id": "esp",
+      "top": 500,
+      "left": 780,
+      "attrs": {}
+    },
+
+    {
+      "type": "wokwi-led-strip",
+      "id": "rightStrip",
+      "top": -333,
+      "left": 1550,
+      "rotate": 270,
+      "attrs": {
+        "pixels": "45"
+      }
+    },
+
+    {
+      "type": "wokwi-led-strip",
+      "id": "topStrip",
+      "top": -850,
+      "left": 100,
+      "rotate": 180,
+      "attrs": {
+        "pixels": "84"
+      }
+    },
+
+    {
+      "type": "wokwi-led-strip",
+      "id": "leftStrip",
+      "top": -333,
+      "left": -440,
+      "rotate": 90,
+      "attrs": {
+        "pixels": "45"
+      }
+    },
+
+    {
+      "type": "wokwi-led-strip",
+      "id": "bottomStrip",
+      "top": 180,
+      "left": 100,
+      "rotate": 0,
+      "attrs": {
+        "pixels": "84"
+      }
+    }
+  ],
+
+  "connections": [
+    [
+      "esp:14",
+      "rightStrip:DIN",
+      "green",
+      []
+    ],
+    [
+      "esp:5V",
+      "rightStrip:VDD",
+      "red",
+      []
+    ],
+    [
+      "esp:GND.1",
+      "rightStrip:VSS",
+      "black",
+      []
+    ],
+
+    [
+      "rightStrip:DOUT",
+      "topStrip:DIN",
+      "green",
+      []
+    ],
+    [
+      "rightStrip:VDD.2",
+      "topStrip:VDD",
+      "red",
+      []
+    ],
+    [
+      "rightStrip:VSS.2",
+      "topStrip:VSS",
+      "black",
+      []
+    ],
+
+    [
+      "topStrip:DOUT",
+      "leftStrip:DIN",
+      "green",
+      []
+    ],
+    [
+      "topStrip:VDD.2",
+      "leftStrip:VDD",
+      "red",
+      []
+    ],
+    [
+      "topStrip:VSS.2",
+      "leftStrip:VSS",
+      "black",
+      []
+    ],
+
+    [
+      "leftStrip:DOUT",
+      "bottomStrip:DIN",
+      "green",
+      []
+    ],
+    [
+      "leftStrip:VDD.2",
+      "bottomStrip:VDD",
+      "red",
+      []
+    ],
+    [
+      "leftStrip:VSS.2",
+      "bottomStrip:VSS",
+      "black",
+      []
+    ]
+  ]
+}
