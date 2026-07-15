@@ -30,20 +30,17 @@ The Wokwi simulation replaces the camera input with a generated RGB565 frame:
 
 The generated simulation frame represents four coloured screen edges:
 
-                 Top edge
           ┌──────────────────┐
           │                  │
-Left edge │                  │ Right edge
+          │                  │
           │                  │
           └──────────────────┘
-               Bottom edge
 
 If the program runs correctly, the edge colours wil rotate periodically so that the simulation can verify that:
-
-- the main loop is running;
-- the simulated frame is updating;
-- LED colours are being recalculated;
-- `FastLED.show()` is refreshing the virtual LED strips.
+1. the main loop is running;
+2. the simulated frame is updating;
+3. LED colours are being recalculated;
+4. `FastLED.show()` is refreshing the virtual LED strips.
 
 Some colour mixing may appear near the four corners. This is expected because each LED samples multiple pixels:
 
