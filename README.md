@@ -6,12 +6,12 @@ The system uses the camera to capture the screen image, samples colors from the 
 ## Basic Workflow
 
 Power on
-→ ESP32-CAM starts automatically
-→ Camera initializes
-→ Camera starts capturing screen frames
-→ Edge colors of the screen image are calculated
-→ WS2812B LED strip lights up according to the calculated colors
+1. ESP32-CAM starts automatically
+2. Camera initializes
+3. Camera starts capturing screen frames
+4. Edge colors of the screen image are calculated
+5. WS2812B LED strip lights up according to the calculated colors
 
 Power off
-→ ESP32-CAM and LED strip lose power
-→ LED strip turns off
+1. ESP32-CAM and LED strip lose power
+2. LED strip turns off
