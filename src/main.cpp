@@ -2,7 +2,6 @@
 #include <string.h>
 
 #include "FastLED.h"
-#include "strip_index.h"
 
 #include "esp_camera.h"
 #include <esp_log.h>
@@ -16,13 +15,39 @@
 //-------------------------------------
 // LED strip settings
 #define LED_PIN 14 // no #CS(GPIO14) required
-#define NUM_LEDS 258
-#define STRIP_WIDTH 84 // number of LEDS
-#define STRIP_HEIGHT 45 // number of LEDS
+
+constexpr uint16_t MaxLEDS = 300; // which is 5m of LED strips at most
+enum class StartEdge : uint8_t {
+	top,
+	bottom,
+	right,
+	left
+}; // to choose the starting edge
+enum class StripDirection : uint8_t{
+	clockwise,
+	counterclockwise
+}; // installed direction of the strip
+struct LedLayoutConfig {
+    uint16_t sideCount;
+    uint16_t horizontalCount;
+    StartEdge startEdge;
+    StripDirection direction;
+};
+LedLayoutConfig defaultV = {
+    45,
+    84,
+    StartEdge::right,
+    StripDirection::counterclockwise
+}; // default layout of the LED strip, changeable
+uint16_t totalCount = (defaultV.sideCount + defaultV.horizontalCount) * 2;
 #define RIGHT_START 0
-#define TOP_START (RIGHT_START + STRIP_HEIGHT)
-#define LEFT_START (TOP_START + STRIP_WIDTH)
-#define BOTTOM_START (LEFT_START + STRIP_HEIGHT) // Right to top to left to bottom
+#define TOP_START (RIGHT_START + defaultV.sideCount)
+#define LEFT_START (TOP_START + defaultV.horizontalCount)
+#define BOTTOM_START (LEFT_START + defaultV.sideCount) // Right to top to left to bottom
+uint16_t rightStart = 0;
+uint16_t topStart = 0;
+uint16_t leftStart = 0;
+uint16_t bottomStart = 0;
 
 #define EDGE_SAMPLES 2
 #define INWARD_SAMPLES 4 // 8 pixels for each LED
@@ -33,8 +58,8 @@
 float GAMMA_R = 2.0f;
 float GAMMA_G = 2.0f;
 float GAMMA_B = 2.0f;
-CRGB leds[NUM_LEDS]; // arry for store the RGB data for strip
-CRGB previousLeds[NUM_LEDS]; // Store the previously displayed LED colors for smooth transition
+CRGB leds[MaxLEDS]; // arry for store the RGB data for strip
+CRGB previousLeds[MaxLEDS]; // Store the previously displayed LED colors for smooth transition
 uint8_t smoothAmount = 128; //Portion of previousLeds
 
 //Camera settings
@@ -115,6 +140,7 @@ static camera_config_t camera_config = {
 bool initFrameBuffers();
 bool initCamera();
 void initLedStrip();
+void calculateEdgeDirection();
 
 void cameraTask(void *pvParameters);
 void copyFrameToBuffer(camera_fb_t *fb);
@@ -125,6 +151,9 @@ void calculateRight();
 void calculateTop();
 void calculateLeft();
 void calculateBottom();
+void blackBarDetection();
+void whiteBalance();
+int mapLedToPixel(uint16_t ledIndex, uint16_t ledCount, uint16_t pixelLength);
 CRGB sampleAverageColor(
     int baseX,
     int baseY,
@@ -251,17 +280,83 @@ void initLedStrip() {
 
 	FastLED.addLeds<CHIPSET, LED_PIN, COLOR_ORDER>(
 		leds,
-		NUM_LEDS
+		MaxLEDS
 	);
 	FastLED.setBrightness(BRIGHTNESS);
 	FastLED.clear();
-	fill_solid(previousLeds, NUM_LEDS, CRGB::Black); // Start from black to the first frame captured
+	fill_solid(previousLeds, MaxLEDS, CRGB::Black); // Start from black to the first frame captured
 	FastLED.show();
 
 	ESP_LOGI(TAG, "LED strip initialized.");
 	ESP_LOGI(TAG, "LED pin: %d", LED_PIN);
-	ESP_LOGI(TAG, "Number of LEDs: %d", NUM_LEDS);
+	ESP_LOGI(TAG, "Number of LEDs: %d", totalCount);
 	ESP_LOGI(TAG, "Brightness: %d", BRIGHTNESS);
+}
+void calculateEdgeDirection()
+{
+	if (defaultV.direction == StripDirection::counterclockwise){
+		switch (defaultV.startEdge){
+        case StartEdge::right:
+            rightStart = 0;
+            topStart = rightStart + defaultV.sideCount;
+            leftStart = topStart + defaultV.horizontalCount;
+            bottomStart = leftStart + defaultV.sideCount;
+            break;
+
+        case StartEdge::top:
+            topStart = 0;
+            leftStart = topStart + defaultV.horizontalCount;
+            bottomStart = leftStart + defaultV.sideCount;
+            rightStart = bottomStart + defaultV.horizontalCount;
+            break;
+
+        case StartEdge::left:
+            leftStart = 0;
+            bottomStart = leftStart + defaultV.sideCount;
+            rightStart = bottomStart + defaultV.horizontalCount;
+            topStart = rightStart + defaultV.sideCount;
+            break;
+
+        case StartEdge::bottom:
+            bottomStart = 0;
+            rightStart = bottomStart + defaultV.horizontalCount;
+            topStart = rightStart + defaultV.sideCount;
+            leftStart = topStart + defaultV.horizontalCount;
+            break;
+        }
+	}
+	else{
+		switch (defaultV.startEdge){
+        case StartEdge::right:
+            rightStart = 0;
+            bottomStart = rightStart + defaultV.sideCount;
+            leftStart = bottomStart + defaultV.horizontalCount;
+            topStart = leftStart + defaultV.sideCount;
+            break;
+
+        case StartEdge::top:
+            topStart = 0;
+            rightStart = topStart + defaultV.horizontalCount;
+            bottomStart = rightStart + defaultV.sideCount;
+            leftStart = bottomStart + defaultV.horizontalCount;
+            break;
+
+        case StartEdge::left:
+            leftStart = 0;
+            topStart = leftStart + defaultV.sideCount;
+            rightStart = topStart + defaultV.horizontalCount;
+            bottomStart = rightStart + defaultV.sideCount;
+            break;
+
+        case StartEdge::bottom:
+            bottomStart = 0;
+            leftStart = bottomStart + defaultV.horizontalCount;
+            topStart = leftStart + defaultV.sideCount;
+            rightStart = topStart + defaultV.horizontalCount;
+            break;
+        }
+
+	}
 }
 
 void cameraTask(void* parameter){
@@ -345,6 +440,30 @@ void calculateLEDColors(){
 	gammaCorrection();
 	smoothTransition();
 }
+int mapLedToPixel(uint16_t ledIndex, uint16_t totCount, uint16_t pixelLength) {
+    if (totalCount == 0 || pixelLength == 0)
+    {
+        return 0;
+    }
+
+    // If there is only one LED on this edge, place its sampling point at the center of the image edge.
+    if (totalCount == 1)
+    {
+        return (pixelLength - 1) / 2;
+    }
+
+    // Map:
+    // LED index 0                  -> pixel 0
+    // LED index totalCount - 1       -> pixel pixelLength - 1
+    //
+    // Other LEDs are distributed evenly between them.
+    uint32_t numerator = (uint32_t)ledIndex * (pixelLength - 1);
+
+    uint32_t denominator = totalCount - 1;
+
+    // Add half of the denominator to achieve rounding instead of always rounding down.
+    return (numerator + denominator / 2) / denominator;
+}
 CRGB sampleAverageColor(int baseX, int baseY, int inwardDx, int inwardDy, int tangentDx, int tangentDy) {
 	uint32_t rSum = 0;
 	uint32_t gSum = 0;
@@ -390,89 +509,117 @@ CRGB rgb565ToCRGB(uint16_t pixel){
     return CRGB(r, g, b);
 }
 void calculateRight(){
-	for (int i = 0; i < STRIP_HEIGHT; i++)
-	{
-		int baseIndex = (int)right_buf[i]; // defined in "strip_index.h"
-		int baseX = baseIndex % IMG_WIDTH;
-		int baseY = baseIndex / IMG_WIDTH;
+		int baseX = IMG_WIDTH - 1;
 		int inwardDx = -1;
 		int inwardDy = 0;
 		int tangentDx = 0;
+		int ledIndex;
+		for (int i = 0; i < defaultV.sideCount; i++)
+	{
+		int baseY = mapLedToPixel(i, defaultV.sideCount, IMG_HEIGHT);
 		int tangentDy = 1;
+
 		if (baseY >= IMG_HEIGHT - 1)
 		{
 			tangentDy = -1;
 		}
-		int ledIndex = RIGHT_START + i;
+
+        if (defaultV.direction == StripDirection::clockwise){
+			ledIndex = rightStart + i;
+        }
+        else{
+			ledIndex = (rightStart + defaultV.sideCount - 1) - i;
+		}
 
 		leds[ledIndex] = sampleAverageColor(baseX, baseY, inwardDx, inwardDy, tangentDx, tangentDy);
 	}
 }
 void calculateTop(){
-	for (int i = 0; i < STRIP_WIDTH; i++)
+	int baseY = 0;
+	int inwardDx = 0;
+	int inwardDy = 1;
+	int tangentDy = 0;
+	int ledIndex;
+	for (int i = 0; i < defaultV.horizontalCount; i++)
 	{
-		int baseIndex = (int)top_buf[i];
-		int baseX = baseIndex % IMG_WIDTH;
-		int baseY = baseIndex / IMG_WIDTH;
-		int inwardDx = 0;
-		int inwardDy = 1;
+		int baseX = mapLedToPixel(i, defaultV.horizontalCount, IMG_WIDTH);
 		int tangentDx = 1;
-		int tangentDy = 0;
+
 		if (baseX >= IMG_WIDTH - 1)
 		{
 			tangentDx = -1;
 		}
-		int ledIndex = TOP_START + i;
+
+        if (defaultV.direction == StripDirection::clockwise){
+			ledIndex = topStart + i;
+        }
+        else{
+			ledIndex = (topStart + defaultV.horizontalCount - 1) - i;
+		}
 
 		leds[ledIndex] = sampleAverageColor(baseX, baseY, inwardDx, inwardDy, tangentDx, tangentDy);
 	}
 }
 void calculateLeft() {
-	for (int i = 0; i < STRIP_HEIGHT; i++)
+	int baseX = 0;
+	int inwardDx = 1;
+	int inwardDy = 0;
+	int tangentDx = 0;
+	int ledIndex;
+	for (int i = 0; i < defaultV.sideCount; i++)
 	{
-		int baseIndex = (int)left_buf[i];
-		int baseX = baseIndex % IMG_WIDTH;
-		int baseY = baseIndex / IMG_WIDTH;
-		int inwardDx = 1;
-		int inwardDy = 0;
-		int tangentDx = 0;
+		int baseY = mapLedToPixel(i, defaultV.sideCount, IMG_HEIGHT);
 		int tangentDy = 1;
+
 		if (baseY >= IMG_HEIGHT - 1)
 		{
 			tangentDy = -1;
 		}
-		int ledIndex = LEFT_START + i;
+
+        if (defaultV.direction == StripDirection::clockwise){
+			ledIndex = (leftStart + defaultV.sideCount - 1) - i;
+        }
+        else{
+			ledIndex = leftStart + i;
+		}
 
 		leds[ledIndex] = sampleAverageColor(baseX, baseY, inwardDx, inwardDy, tangentDx, tangentDy);
 	}
 }
 void calculateBottom() {
-	for (int i = 0; i < STRIP_WIDTH; i++)
+	int baseY = IMG_HEIGHT - 1;
+	int inwardDx = 0;
+	int inwardDy = -1;
+	int tangentDy = 0;
+	int ledIndex;
+	for (int i = 0; i < defaultV.sideCount; i++)
 	{
-		int baseIndex = (int)bottom_buf[i];
-		int baseX = baseIndex % IMG_WIDTH;
-		int baseY = baseIndex / IMG_WIDTH;
-		int inwardDx = 0;
-		int inwardDy = -1;
+		int baseX = mapLedToPixel(i, defaultV.horizontalCount, IMG_WIDTH);
 		int tangentDx = 1;
-		int tangentDy = 0;
+		
 		if (baseX >= IMG_WIDTH - 1)
 		{
 			tangentDx = -1;
 		}
-		int ledIndex = BOTTOM_START + i;
+
+		if (defaultV.direction == StripDirection::clockwise){
+			ledIndex = (bottomStart + defaultV.horizontalCount - 1) - i;
+        }
+        else{
+			ledIndex = bottomStart + i;
+		}
 
 		leds[ledIndex] = sampleAverageColor(baseX, baseY, inwardDx, inwardDy, tangentDx, tangentDy);
 	}
 }
 void gammaCorrection(){
-	for (int i = 0; i < NUM_LEDS; i++)
+	for (int i = 0; i < totalCount; i++)
 	{
 		leds[i] = applyGamma_video(leds[i], GAMMA_R, GAMMA_G, GAMMA_B);
 	}
 }
 void smoothTransition(){
-	for (int i = 0; i < NUM_LEDS; i++)
+	for (int i = 0; i < totalCount; i++)
 	{
 		CRGB targetColor = leds[i];
 
@@ -484,6 +631,9 @@ void smoothTransition(){
 
 		previousLeds[i] = leds[i]; // Prepare for next loop
 	}
+}
+void whiteBalance(){
+
 }
 
 void setup(){
@@ -534,6 +684,9 @@ void setup(){
 		}
 	}
 	ESP_LOGI(TAG, "Camera task created successfully.");
+
+	calculateEdgeDirection();
+	ESP_LOGI(TAG, "LED strip layout completed.");
 
 	ESP_LOGI(TAG, "Setup completed.");
 }
